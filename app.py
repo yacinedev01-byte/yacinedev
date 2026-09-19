@@ -207,16 +207,58 @@ def load_registered(name: str):
     if not path.is_file():
         return None
     src = path.read_text(encoding="utf-8")
-    # تنفيذ معزول نسبياً: لا builtins خطرة
+    import math as _math
+    import datetime as _datetime
+    import collections as _collections
+    import itertools as _itertools
+    import functools as _functools
+    import statistics as _statistics
+    import hashlib as _hashlib
+    import base64 as _base64
+    import urllib.parse as _urlparse
+
+    # مكتبات مسموحة فقط داخل الأدوات المسجّلة
+    allowed_modules = {
+        "re": re,
+        "json": json,
+        "math": _math,
+        "datetime": _datetime,
+        "collections": _collections,
+        "itertools": _itertools,
+        "functools": _functools,
+        "statistics": _statistics,
+        "hashlib": _hashlib,
+        "base64": _base64,
+        "urllib": __import__("urllib"),
+        "urllib.parse": _urlparse,
+    }
+
+    def safe_import(mod_name, globals=None, locals=None, fromlist=(), level=0):
+        root = mod_name.split(".")[0]
+        if mod_name in allowed_modules:
+            return allowed_modules[mod_name]
+        if root in allowed_modules and not fromlist:
+            return allowed_modules[root]
+        if root in allowed_modules:
+            return allowed_modules[root]
+        raise ImportError(f"الاستيراد غير مسموح: {mod_name}")
+
     safe_builtins = {
         "abs": abs, "min": min, "max": max, "sum": sum, "len": len, "range": range,
         "enumerate": enumerate, "sorted": sorted, "list": list, "dict": dict, "set": set,
         "tuple": tuple, "str": str, "int": int, "float": float, "bool": bool,
         "print": print, "isinstance": isinstance, "type": type, "round": round,
         "zip": zip, "map": map, "filter": filter, "any": any, "all": all,
-        "json": json, "re": re, "math": __import__("math"),
+        "repr": repr, "sorted": sorted, "reversed": reversed, "pow": pow,
+        "__import__": safe_import,
     }
-    ns: dict[str, Any] = {"__builtins__": safe_builtins}
+    ns: dict[str, Any] = {
+        "__builtins__": safe_builtins,
+        # متاحة مباشرة بدون import
+        "re": re,
+        "json": json,
+        "math": _math,
+    }
     exec(compile(src, str(path), "exec"), ns, ns)
     fn = ns.get("run")
     if not callable(fn):
