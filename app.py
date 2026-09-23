@@ -17,6 +17,20 @@ import shutil
 import subprocess
 import time
 import traceback
+import base64
+import ipaddress
+import socket
+import threading
+import signal
+import resource
+import difflib
+from urllib.parse import urlparse
+
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+except Exception:
+    sync_playwright = None
+    PlaywrightTimeoutError = TimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +44,58 @@ TOOLS_DIR = Path(os.environ.get("PYTHON_TOOLS_DIR", "/tmp/yd_python_tools"))
 WORKROOT.mkdir(parents=True, exist_ok=True)
 TOOLS_DIR.mkdir(parents=True, exist_ok=True)
 
+_browser_lock = threading.RLock()
+_browser_runtime = None
+_browser_contexts = {}
+
+def _safe_url(url: str) -> str:
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("الرابط يجب أن يبدأ بـ http:// أو https://")
+    host = parsed.hostname.lower().rstrip(".")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        raise ValueError("الوصول إلى عناوين داخلية غير مسموح")
+    try:
+        addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        for item in addresses:
+            ip = ipaddress.ip_address(item[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                raise ValueError("الوصول إلى الشبكات الداخلية غير مسموح")
+    except socket.gaierror as exc:
+        raise ValueError(f"تعذر حل اسم النطاق: {exc}")
+    return url
+
+def _browser_context(session: str):
+    global _browser_runtime
+    if sync_playwright is None:
+        raise RuntimeError("Playwright غير مثبت على الخادم")
+    session = re.sub(r"[^a-zA-Z0-9_-]", "_", str(session or "default"))[:64] or "default"
+    with _browser_lock:
+        if _browser_runtime is None:
+            _browser_runtime = sync_playwright().start()
+        ctx = _browser_contexts.get(session)
+        if ctx is None:
+            browser = _browser_runtime.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            ctx = browser.new_context(viewport={"width": 1280, "height": 900}, java_script_enabled=True)
+            _browser_contexts[session] = ctx
+        pages = ctx.pages
+        page = pages[0] if pages else ctx.new_page()
+        page.set_default_timeout(BROWSER_TIMEOUT_MS)
+        return session, ctx, page
+
+def _close_browser(session: str):
+    session = re.sub(r"[^a-zA-Z0-9_-]", "_", str(session or "default"))[:64] or "default"
+    with _browser_lock:
+        ctx = _browser_contexts.pop(session, None)
+        if ctx:
+            ctx.close()
+
 MAX_TIMEOUT = 120
 MAX_OUTPUT = 200_000
 MAX_SOURCE = 250_000
+MAX_BROWSER_TEXT = 100_000
+MAX_SCREENSHOT = 2_000_000
+BROWSER_TIMEOUT_MS = 30_000
 
 BLOCKED_SHELL = [
     r"\brm\s+-rf\s+/(\s|$)",
@@ -40,6 +103,8 @@ BLOCKED_SHELL = [
     r"\bdd\s+if=.*of=/dev",
     r":\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:",
     r"\bshutdown\b|\breboot\b",
+    r"\bmount\b|\bumount\b|\binsmod\b|\brmmod\b|\bsystemctl\b|\bservice\s+",
+    r"/proc/|/sys/|/dev/[^nullzero]",
 ]
 
 # مكتبات/نداءات ممنوعة داخل كود الأدوات المسجّلة
@@ -57,6 +122,41 @@ def ok_auth() -> bool:
     return request.headers.get("X-Api-Key") == API_KEY
 
 
+def _child_limits(timeout: int) -> None:
+    """Apply best-effort Linux limits inside the Railway container."""
+    try:
+        resource.setrlimit(resource.RLIMIT_CPU, (timeout + 2, timeout + 2))
+        resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_FSIZE, (50 * 1024 * 1024, 50 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
+        resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+    except (OSError, ValueError):
+        pass
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _session_name(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", str(value or "default"))[:64] or "default"
+
+
+def _session_path(session: str, name: str = "") -> Path:
+    root = (WORKROOT / _session_name(session)).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = (root / name).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError("مسار خارج مساحة الجلسة غير مسموح")
+    return candidate
+
+
 @app.before_request
 def check_auth():
     if request.path == "/health":
@@ -72,7 +172,7 @@ def health():
     return jsonify(
         ok=True,
         service="yd-shell-python-agent",
-        features=["shell", "python_tools", "python_run", "python_register"],
+        features=["shell", "code_run_python", "python_tools", "python_run", "python_register", "workspace_list", "workspace_read", "workspace_write", "workspace_diff", "browser_navigate", "browser_read", "browser_click", "browser_type", "browser_screenshot"],
     )
 
 
@@ -96,30 +196,131 @@ def shell():
 
     started = time.time()
     try:
-        proc = subprocess.run(
-            ["/bin/bash", "-lc", cmd],
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        clean_env = {
+            k: v for k, v in os.environ.items()
+            if k in {"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR"}
+        }
+        clean_env["HOME"] = str(workdir)
+        proc = subprocess.Popen(
+            ["/bin/bash", "-lc", cmd], cwd=str(workdir), env=clean_env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True, preexec_fn=lambda: _child_limits(timeout),
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_group(proc)
+            stdout, stderr = proc.communicate()
+            return jsonify(ok=False, error=f"انتهت المهلة بعد {timeout} ثانية",
+                           stdout=(stdout or str(exc.stdout or ""))[-MAX_OUTPUT:],
+                           stderr=(stderr or str(exc.stderr or ""))[-MAX_OUTPUT:], timed_out=True), 200
         return jsonify(
             ok=proc.returncode == 0,
             exit_code=proc.returncode,
-            stdout=(proc.stdout or "")[-MAX_OUTPUT:],
-            stderr=(proc.stderr or "")[-MAX_OUTPUT:],
+            stdout=(stdout or "")[-MAX_OUTPUT:],
+            stderr=(stderr or "")[-MAX_OUTPUT:],
             duration_s=round(time.time() - started, 2),
             workdir=str(workdir),
         )
-    except subprocess.TimeoutExpired as e:
-        return jsonify(
-            ok=False,
-            error=f"انتهت المهلة بعد {timeout} ثانية",
-            stdout=((e.stdout or "") if isinstance(e.stdout, str) else "")[-MAX_OUTPUT:],
-            stderr=((e.stderr or "") if isinstance(e.stderr, str) else "")[-MAX_OUTPUT:],
-        ), 200
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 500
+
+
+@app.post("/code/run")
+def code_run():
+    data = request.get_json(silent=True) or {}
+    language = str(data.get("language") or "python").lower()
+    source = str(data.get("source") or "")
+    if language not in {"python", "py"}:
+        return jsonify(ok=False, error="حالياً اللغة المدعومة هي Python فقط"), 400
+    if not source or len(source) > MAX_SOURCE:
+        return jsonify(ok=False, error="source فارغ أو طويل جداً"), 400
+    try:
+        ast.parse(source)
+    except SyntaxError as exc:
+        return jsonify(ok=False, error=f"خطأ بناء جملة: {exc}"), 400
+    session = _session_name(data.get("session") or "default")
+    timeout = max(1, min(int(data.get("timeout") or 30), MAX_TIMEOUT))
+    workdir = _session_path(session)
+    source_path = workdir / "__yd_code_run.py"
+    source_path.write_text(source, encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            ["/usr/local/bin/python", "-I", str(source_path)], cwd=str(workdir),
+            env={"PATH": os.environ.get("PATH", ""), "HOME": str(workdir), "LANG": "C.UTF-8"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True, preexec_fn=lambda: _child_limits(timeout),
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            stdout, stderr = proc.communicate()
+            return jsonify(ok=False, error=f"انتهت المهلة بعد {timeout} ثانية",
+                           stdout=(stdout or "")[-MAX_OUTPUT:], stderr=(stderr or "")[-MAX_OUTPUT:], timed_out=True), 200
+        return jsonify(ok=proc.returncode == 0, exit_code=proc.returncode,
+                       stdout=(stdout or "")[-MAX_OUTPUT:], stderr=(stderr or "")[-MAX_OUTPUT:], workdir=str(workdir))
+    finally:
+        source_path.unlink(missing_ok=True)
+
+
+@app.post("/workspace/list")
+def workspace_list():
+    data = request.get_json(silent=True) or {}
+    try:
+        session = data.get("session") or "default"
+        root = _session_path(session, str(data.get("path") or ""))
+        if not root.exists() or not root.is_dir():
+            return jsonify(ok=False, error="المجلد غير موجود"), 404
+        base = _session_path(session)
+        items = [{"name": p.name, "type": "directory" if p.is_dir() else "file", "size": p.stat().st_size if p.is_file() else 0}
+                 for p in sorted(root.iterdir(), key=lambda x: x.name.lower())[:500]]
+        return jsonify(ok=True, items=items, path=str(root.relative_to(base)))
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@app.post("/workspace/read")
+def workspace_read():
+    data = request.get_json(silent=True) or {}
+    try:
+        p = _session_path(data.get("session") or "default", str(data.get("path") or ""))
+        if not p.is_file():
+            return jsonify(ok=False, error="الملف غير موجود"), 404
+        raw = p.read_text(encoding="utf-8", errors="replace")
+        return jsonify(ok=True, path=str(data.get("path")), content=raw[:MAX_OUTPUT], truncated=len(raw) > MAX_OUTPUT)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@app.post("/workspace/write")
+def workspace_write():
+    data = request.get_json(silent=True) or {}
+    try:
+        rel = str(data.get("path") or "").strip()
+        content = str(data.get("content") or "")
+        if not rel or len(content) > MAX_SOURCE:
+            return jsonify(ok=False, error="path/content غير صالح"), 400
+        p = _session_path(data.get("session") or "default", rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return jsonify(ok=True, path=rel, size=len(content.encode("utf-8")))
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+
+@app.post("/workspace/diff")
+def workspace_diff():
+    data = request.get_json(silent=True) or {}
+    try:
+        rel = str(data.get("path") or "")
+        p = _session_path(data.get("session") or "default", rel)
+        before = str(data.get("before") or "").splitlines(keepends=True)
+        after = p.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True) if p.is_file() else []
+        diff = "".join(difflib.unified_diff(before, after, fromfile="before", tofile=rel))
+        return jsonify(ok=True, diff=diff[:MAX_OUTPUT])
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
 
 
 @app.post("/reset")
@@ -132,6 +333,86 @@ def reset():
     workdir.mkdir(parents=True, exist_ok=True)
     return jsonify(ok=True, session=session)
 
+
+
+# ───────────────── Browser bridge ─────────────────
+
+def _browser_response(session: str, page):
+    title = page.title()
+    text = page.locator("body").inner_text(timeout=5000) if page.locator("body").count() else ""
+    return {"ok": True, "session": session, "url": page.url, "title": title, "text": text[:MAX_BROWSER_TEXT], "truncated": len(text) > MAX_BROWSER_TEXT}
+
+@app.post("/browser/navigate")
+def browser_navigate():
+    data = request.get_json(silent=True) or {}
+    try:
+        url = _safe_url(data.get("url") or "")
+        session, _, page = _browser_context(data.get("session") or "default")
+        page.goto(url, wait_until="domcontentloaded", timeout=BROWSER_TIMEOUT_MS)
+        return jsonify(_browser_response(session, page))
+    except PlaywrightTimeoutError:
+        return jsonify(ok=False, error="انتهت مهلة تحميل الصفحة"), 504
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+@app.post("/browser/read")
+def browser_read():
+    data = request.get_json(silent=True) or {}
+    try:
+        session, _, page = _browser_context(data.get("session") or "default")
+        return jsonify(_browser_response(session, page))
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+@app.post("/browser/click")
+def browser_click():
+    data = request.get_json(silent=True) or {}
+    try:
+        session, _, page = _browser_context(data.get("session") or "default")
+        selector = str(data.get("selector") or "").strip()
+        if not selector or len(selector) > 500:
+            return jsonify(ok=False, error="selector مطلوب"), 400
+        page.locator(selector).first.click(timeout=BROWSER_TIMEOUT_MS)
+        page.wait_for_timeout(300)
+        return jsonify(_browser_response(session, page))
+    except PlaywrightTimeoutError:
+        return jsonify(ok=False, error="تعذر النقر ضمن المهلة"), 504
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+@app.post("/browser/type")
+def browser_type():
+    data = request.get_json(silent=True) or {}
+    try:
+        session, _, page = _browser_context(data.get("session") or "default")
+        selector = str(data.get("selector") or "").strip()
+        text = str(data.get("text") or "")
+        if not selector or len(selector) > 500 or len(text) > 50_000:
+            return jsonify(ok=False, error="selector/text غير صالح"), 400
+        page.locator(selector).first.fill(text, timeout=BROWSER_TIMEOUT_MS)
+        return jsonify(_browser_response(session, page))
+    except PlaywrightTimeoutError:
+        return jsonify(ok=False, error="تعذر الكتابة ضمن المهلة"), 504
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+@app.post("/browser/screenshot")
+def browser_screenshot():
+    data = request.get_json(silent=True) or {}
+    try:
+        session, _, page = _browser_context(data.get("session") or "default")
+        raw = page.screenshot(type="png", full_page=bool(data.get("full_page")))
+        if len(raw) > MAX_SCREENSHOT:
+            return jsonify(ok=False, error="الصورة أكبر من الحد المسموح"), 413
+        return jsonify(ok=True, session=session, url=page.url, mime="image/png", base64=base64.b64encode(raw).decode("ascii"))
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+@app.post("/browser/close")
+def browser_close():
+    data = request.get_json(silent=True) or {}
+    _close_browser(data.get("session") or "default")
+    return jsonify(ok=True)
 
 # ───────────────── Built-in Python tools ─────────────────
 
