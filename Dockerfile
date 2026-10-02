@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && (playwright install --with-deps chromium || true)
-COPY app.py agent_cmds.py ./
+COPY app.py agent_cmds.py agent_runtime.py metrics.py webhooks.py cron.py sandbox.py ./
 
 ENV SHELL_WORKROOT=/tmp/yd_sandbox
 EXPOSE 8080
