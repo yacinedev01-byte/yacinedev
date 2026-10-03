@@ -1,0 +1,85 @@
+--- a/pages/_app.php
++++ b/pages/_app.php
+@@ -6157,31 +6157,25 @@
+       setTimeout(openWhatsNew, 450);
+     }
+   } catch (e) {}
+-})();
+-
+-
+-  
+-  /* SYNC_CHAT_URL */
++  /* Keep URL-to-chat synchronization inside this closure so its state helpers exist. */
+   (function syncChatFromUrl() {
+     var cid = getUrlChatId();
+     if (!cid) {
+       cid = 'c_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+       setUrlChatId(cid);
+     }
+-    // اربط المحادثة النشطة بالمعرّف
+     try {
+-      if (typeof state !== 'undefined' && state.chats) {
+-        var found = state.chats.find(function (c) { return c.id === cid; });
+-        if (!found) {
+-          state.chats.unshift({ id: cid, title: 'محادثة', messages: [], updated: Date.now(), kimi_id: '' });
+-          if (typeof save === 'function') save();
+-        }
+-        state.active = cid;
+-        if (typeof renderList === 'function') renderList();
+-        if (typeof renderMessages === 'function') renderMessages();
++      var found = state.chats.find(function (c) { return c.id === cid; });
++      if (!found) {
++        state.chats.unshift({ id: cid, title: 'محادثة', messages: [], updated: Date.now(), kimi_id: '' });
++        save();
+       }
++      state.activeId = cid;
++      renderList();
++      renderMessages();
+     } catch (e) {}
+   })();
++})();
+ 
+ 
+   /* Continue a project: place its generated brief in the composer once. */
+@@ -6521,7 +6515,6 @@
+ <script src="assets/js/vendor/purifier.min.js"></script>
+ <script src="assets/js/vendor/highlight.min.js"></script>
+ <link rel="stylesheet" href="assets/js/vendor/github.min.css">
+-<script src="assets/js/think_ui.js?v=43"></script>
+ <script src="assets/js/yd_markdown.js?v=<?= htmlspecialchars($yd_v ?? '1') ?>"></script>
+ <script src="assets/js/vendor/d3/d3.js" defer></script>
+ <script src="assets/js/vendor/markmap/lib.js" defer></script>
+@@ -6785,6 +6778,8 @@
+ <style id="yd-layout-stability-v43">
+ /* Unified layout stability: one visible activity surface, no legacy floating overlap. */
+ *{box-sizing:border-box}
++/* Keep fixed overlays from expanding the mobile layout viewport and shifting the chat off-screen. */
++html{overflow-x:clip}
+ .app{grid-template-columns:minmax(0,300px) minmax(0,1fr);min-width:0}
+ .main,.stream,.stream-inner{min-width:0;max-width:100%}
+ /* The new km-tl Summary replaces the old floating thinking panels. */
+--- a/assets/js/think_ui.js
++++ b/assets/js/think_ui.js
+@@ -591,14 +591,14 @@
+       '<div class="yd-summary-sheet__backdrop" data-summary-close></div>' +
+       '<section class="yd-summary-sheet__panel" role="dialog" aria-modal="true" aria-label="Summary">' +
+         '<div class="yd-summary-sheet__handle" aria-hidden="true"></div>' +
+-        '<header class="yd-summary-sheet__head">' +
+-          '<button type="button" class="yd-summary-sheet__close" data-summary-nav aria-label="إغلاق">×</button>' +
+-          '<h2 data-summary-title>Summary</h2>' +
+-          '<span class="yd-summary-sheet__spacer" aria-hidden="true"></span>' +
+-        '</header>' +
+-        '<div class="yd-summary-sheet__list" data-summary-list></div>' +
+-      '</section>';
+-    this.el.appendChild(sheet);
++      '<header class="yd-summary-sheet__head">' +
++        '<button type="button" class="yd-summary-sheet__close" data-summary-nav aria-label="إغلاق">×</button>' +
++        '<h2 data-summary-title>Summary</h2>' +
++        '<span class="yd-summary-sheet__spacer" aria-hidden="true"></span>' +
++      '</header>' +
++      '<div class="yd-summary-sheet__list" data-summary-list></div>' +
++    '</section>';
++    document.body.appendChild(sheet);
+     this._sheet = sheet;
+     var self = this;
+     sheet.addEventListener('click', function (e) {
