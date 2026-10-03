@@ -10,6 +10,6 @@ git apply site-patches/snablox-summary-icons.patch
 ```
 
 - `snablox-mobile-black-screen.patch` fixes mobile viewport expansion and keeps chat URL synchronization inside its application closure.
-- `snablox-summary-icons.patch` uses the supplied circular SVG arrow and a custom high-contrast brain SVG. It also overrides the legacy global `svg[aria-hidden="true"]` sprite-hiding rule only for the visible Summary and thinking icons; without this scoped exception, those SVGs were positioned at `left:-9999px`.
+- `snablox-summary-icons.patch` uses the supplied Android Vector path for the thinking icon and the circular SVG arrow. It renders only the actual `thinking → tool → thinking → tool` sequence, captures the agent's real post-tool thought, and suppresses replayed SSE events by step ID so retries/new steps remain visible without duplicated rows. It also scopes an exception to the legacy global `svg[aria-hidden="true"]` sprite-hiding rule; without it, visible Summary icons were positioned at `left:-9999px`.
 
-No API keys or session tokens are included.
+The Summary list retains every event produced during a run; this does not disable the agent's existing execution limits. No API keys or session tokens are included.
