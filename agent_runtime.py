@@ -262,7 +262,6 @@ def _run_shell(cmd: str, session: str) -> dict:
 
 SYSTEM_PROMPT = """أنت وكيل YACINEDEV يعمل على سيرفر Railway الدائم.
 أجب بالعربية الفصحى الواضحة ما لم يطلب المستخدم لغة أخرى.
-قبل كل ACTION اكتب سطراً موجزاً بصيغة "تحديث للمستخدم: ..." يذكر الإجراء القادم وغايته العملية فقط، دون سرد التفكير الداخلي أو البدائل الخاصة.
 عندما تحتاج أداة، أخرج سطراً واحداً بالشكل:
 ACTION: tool_name
 INPUT: {json}
@@ -398,132 +397,43 @@ def _request_platform_tool(job_id: str, tool: str, args: dict, timeout: int = 18
     return {"ok": False, "error": "انتهت مهلة أداة المنصة؛ اترك تبويب المنصة مفتوحًا أثناء استخدام Snablox"}
 
 
-def _progress_clean(value, limit: int = 220) -> str:
-    if value is None:
-        return ""
-    text = str(value)
-    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
-    text = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[محجوب]", text)
-    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[محجوب]", text)
-    text = re.sub(r"(?i)((?:x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*)[^\s,;]+", r"\1[محجوب]", text)
-    text = re.sub(r"(?i)([?&](?:token|key|api_key|access_token|password)=)[^&#\s]+", r"\1[محجوب]", text)
-    text = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "[مفتاح محجوب]", text)
-    text = re.sub(r"[\r\n\t]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
-
-
-def _progress_input_summary(tool: str, args: Optional[dict]) -> str:
-    args = args if isinstance(args, dict) else {}
-    labels = {
-        "cmd": "الأمر", "command": "الأمر", "code": "المقطع", "query": "الطلب",
-        "goal": "الهدف", "url": "الرابط", "path": "المسار", "expr": "التعبير",
-        "expression": "التعبير", "action": "الإجراء", "tool": "الأداة",
-    }
-    parts = []
-    for key in ("action", "cmd", "command", "code", "goal", "query", "url", "path", "expr", "expression", "tool"):
-        value = args.get(key)
-        if value in (None, "", [], {}):
-            continue
-        clean = _progress_clean(value, 135)
-        if clean:
-            parts.append(f"{labels[key]}: {clean}")
-        if len(parts) >= 2:
-            break
-    return "؛ ".join(parts)
-
-
-def _progress_result_summary(result: dict) -> str:
-    labels = {
-        "summary": "الخلاصة", "message": "الرسالة", "title": "العنوان",
-        "stdout": "المخرجات", "output": "المخرجات", "result": "النتيجة",
-        "error": "الخطأ", "detail": "التفصيل", "stderr": "رسالة التنفيذ",
-        "note": "ملاحظة", "path": "المسار", "query": "البحث", "plan": "الخطة",
-    }
-    priority = ("error", "stderr", "summary", "message", "detail", "stdout", "output", "result", "title", "note", "path", "query", "plan") if result.get("ok") is False else ("summary", "message", "title", "stdout", "output", "result", "error", "detail", "stderr", "note", "path", "query", "plan")
-    for key in priority:
-        value = result.get(key)
-        if value in (None, "", [], {}):
-            continue
-        if isinstance(value, dict):
-            safe = []
-            for subkey in ("summary", "message", "title", "path", "count", "files_count", "status", "exit_code", "stdout", "stderr", "error"):
-                subvalue = value.get(subkey)
-                if subvalue not in (None, "", [], {}):
-                    safe.append(f"{subkey}: {_progress_clean(subvalue, 70)}")
-            text = "؛ ".join(safe) or "وصلت بيانات منظمة من الأداة"
-        elif isinstance(value, (list, tuple)):
-            text = "، ".join(_progress_clean(x, 55) for x in value[:3] if x not in (None, "", [], {}))
-            if len(value) > 3:
-                text += f"؛ وعناصر أخرى ({len(value)})"
-        else:
-            text = _progress_clean(value, 180)
-        if text:
-            detail = f"{labels[key]}: {text}"
-            if result.get("exit_code") is not None:
-                detail += f"؛ رمز الخروج: {result['exit_code']}"
-            elif result.get("http") is not None:
-                detail += f"؛ HTTP {result['http']}"
-            return _progress_clean(detail, 205)
-    if result.get("exit_code") is not None:
-        return f"رمز الخروج: {result['exit_code']}"
-    return "لم تُرجع الأداة ملخصًا نصيًا؛ سأتحقق من الحالة النهائية."
-
-
-def _tool_progress_block(step: int, max_steps: int, tool: str, result: dict, args: Optional[dict] = None) -> str:
+def _tool_progress_block(step: int, max_steps: int, tool: str, result: dict) -> str:
     result = result if isinstance(result, dict) else {"result": result}
-    if result.get("ok") is True or result.get("exit_code") == 0:
-        status = "نجح التنفيذ."
-    elif result.get("ok") is False or (result.get("exit_code") is not None and result.get("exit_code") != 0):
-        status = "تعثر التنفيذ؛ أراجع رسالة الخطأ أو أختار مسارًا بديلًا."
+    if result.get("ok") is True:
+        status = "اكتمل بنجاح."
+    elif result.get("ok") is False:
+        status = "لم يكتمل بنجاح؛ سأوضح السبب في النتيجة."
     else:
-        status = "وصلت نتيجة الأداة؛ أتحقق من تفاصيلها."
+        status = "وصلت نتيجة الأداة."
 
-    input_summary = _progress_input_summary(tool, args)
-    tool_line = f"الأداة: {tool}"
-    if input_summary:
-        tool_line += f" — {input_summary}"
-    next_step = (
-        "أراجع المخرجات وأقدّم الخلاصة النهائية."
-        if step >= max_steps
-        else ("أفحص سبب التعثر قبل المتابعة." if result.get("ok") is False else "أستخدم هذه النتيجة في الخطوة التالية.")
-    )
+    detail = "استُلمت المخرجات، دون عرض محتوى الملفات أو البيانات الطويلة هنا."
+    for key, label in (("error", "السبب"), ("summary", "الخلاصة"), ("title", "العنوان"), ("path", "المسار"), ("count", "عدد النتائج"), ("files_count", "عدد الملفات"), ("status", "الحالة"), ("query", "البحث")):
+        value = result.get(key)
+        if value not in (None, "", [], {}):
+            text = re.sub(r"\s+", " ", str(value)).strip()
+            text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[محجوب]", text)
+            text = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*)[^\s,;]+", r"\1[محجوب]", text)
+            detail = f"{label}: {text[:115]}"
+            break
+    next_step = "سأتابع اعتمادًا على النتيجة." if step < max_steps else "سأنتقل إلى خلاصة المهمة."
     return "\n".join([
-        f"تقدم التنفيذ — الخطوة {step}/{max_steps}",
-        tool_line,
+        f"تحديث المهمة — الخطوة {step}/{max_steps}",
+        f"الأداة/الأمر: {tool}",
         f"الحالة: {status}",
-        f"ما تحقق: {_progress_result_summary(result)}",
+        f"النتيجة: {detail}",
         f"التالي: {next_step}",
     ]) + "\n"
 
 
 def _initial_task_plan(message: str) -> str:
-    goal = _progress_clean(message, 120) or "تنفيذ طلبك"
-    low = str(message or "").lower()
-    if any(word in low for word in ("ارفع", "نشر", "تحديث", "deploy", "upload", "رفع")):
-        review = "أراجع الملفات والوجهة الحالية قبل إجراء التغيير."
-        execute = "أطبّق التحديث مع الحفاظ على نسخة استعادة عند الحاجة."
-    elif any(word in low for word in ("ابحث", "قارن", "تحقق", "افحص", "research", "search")):
-        review = "أحدد ما يلزم فحصه وأجمع النتائج ذات الصلة."
-        execute = "أتحقق من النتائج بمصدر أو اختبار مناسب."
-    elif any(word in low for word in ("اكتب", "أنشئ", "عدّل", "أصلح", "برمج", "build", "fix", "create")):
-        review = "أحدد موضع التعديل والأداة الأنسب للتنفيذ."
-        execute = "أنفذ التغيير ثم أراجع أثره أو اختباره."
-    else:
-        review = "أفكك الطلب إلى خطوات عملية وأحدد الأداة المناسبة."
-        execute = "أنفذ كل خطوة وأستند إلى نتيجة الأداة الفعلية."
+    goal = re.sub(r"\s+", " ", str(message or "")).strip()[:100]
     return "\n".join([
         "خطة المهمة:",
-        f"1. الهدف: {goal}",
-        f"2. المراجعة: {review}",
-        f"3. التنفيذ والتحقق: {execute}",
-        "4. الإكمال: ألخص ما تحقق وما بقي بوضوح.",
+        f"1. الهدف: {goal or 'تنفيذ طلبك' }",
+        "2. اختيار الأدوات المناسبة، واستخدام Snablox إذا احتاجت المهمة ملفات المنصة.",
+        "3. تنفيذ الخطوات والتحقق من النتائج المتاحة.",
+        "4. تلخيص ما أُنجز وذكر أي خطوة ما زالت مطلوبة.",
     ]) + "\n"
-
-
-def _public_action_update(preface: str) -> str:
-    match = re.search(r"(?im)^\s*(?:تحديث للمستخدم|سأفعل الآن|progress)\s*:\s*(.+)$", str(preface or ""))
-    return _progress_clean(match.group(1), 180) if match else ""
 
 
 def _execute_tool(tool: str, args: dict, session: str, job_id: Optional[str] = None) -> dict:
@@ -580,7 +490,7 @@ def _worker(job_id: str, platform_context: str = "") -> None:
             plan = _internal_cmd("plan", {"goal": message, "session": session})
             _append_event(job, "tool", tool="plan", result=plan)
             job = _read_job(job_id) or job
-            _append_event(job, "thinking", text=_tool_progress_block(1, max_steps, "plan", plan, {"goal": message}))
+            _append_event(job, "thinking", text=_tool_progress_block(1, max_steps, "plan", plan))
             job = _read_job(job_id) or job
             answer = (
                 "## نتيجة (وضع بدون LLM)\n\n"
@@ -606,9 +516,7 @@ def _worker(job_id: str, platform_context: str = "") -> None:
                 + "\n\nبروتوكول التنفيذ الملزم لهذا API: عند طلب أداة اكتب ACTION: tool_name ثم INPUT: {JSON}. "
                 "يمكن استخدام أسماء الأدوات الموصوفة أعلاه؛ الأدوات الخاصة بالمنصة تُنفذ عبر جسر جلسة المستخدم إلى PHP/Snablox. "
                 "لا تستخدم مساحة fs على Railway بدلاً من workspace/Snablox الخاصة بالمستخدم. "
-                "قبل الأداة أرسل تحديثاً عملياً موجزاً بصيغة تحديث للمستخدم، وبعدها اعرض ملخصاً واقعياً لمدخل الأداة ونتيجتها وحالتها والخطوة التالية. "
-                "استند إلى stdout/stderr أو المسار أو العدد عند توافرها، ولا تكتف بعبارة عامة مثل استُلمت المخرجات. "
-                "لا تعرض التفكير الداخلي أو خطوات الاستدلال؛ اختم بالإجابة النهائية بالعربية."
+                "لا تعرض التفكير الداخلي أو خطوات الاستدلال؛ أرسل تحديث تقدم موجزاً فقط، ثم الإجابة النهائية بالعربية."
             )
 
         messages = [
@@ -645,11 +553,7 @@ def _worker(job_id: str, platform_context: str = "") -> None:
 
             actions, preface = _parse_actions(content)
             if preface:
-                public_update = _public_action_update(preface)
-                if public_update:
-                    _append_event(job, "thinking", text=f"\nتحديث للمستخدم: {public_update}\n")
-                else:
-                    _append_event(job, "thinking", text="تم تحديد الخطوة المناسبة، جارٍ تنفيذها.\n")
+                _append_event(job, "thinking", text="تم تحديد الخطوة المناسبة، جارٍ تنفيذها.\n")
                 job = _read_job(job_id) or job
 
             if not actions:
@@ -674,7 +578,7 @@ def _worker(job_id: str, platform_context: str = "") -> None:
                 result = _execute_tool(tool, args or {}, session, job_id)
                 _append_event(job, "tool", tool=tool, args=args, result=result)
                 job = _read_job(job_id) or job
-                _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, tool, result, args))
+                _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, tool, result))
                 job = _read_job(job_id) or job
 
                 messages.append({"role": "assistant", "content": content})
@@ -706,7 +610,7 @@ def _worker(job_id: str, platform_context: str = "") -> None:
                         job = _read_job(job_id) or job
                         _append_event(job, "tool", tool=tname, args=a["args"], result=results[tname])
                         job = _read_job(job_id) or job
-                        _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, tname, results[tname], a["args"]))
+                        _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, tname, results[tname]))
                 else:
                     with ThreadPoolExecutor(max_workers=3) as ex:
                         futures = {
@@ -723,7 +627,7 @@ def _worker(job_id: str, platform_context: str = "") -> None:
                     for a in actions:
                         _append_event(job, "tool", tool=a["tool"], args=a["args"], result=results.get(a["tool"]))
                         job = _read_job(job_id) or job
-                        _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, a["tool"], results.get(a["tool"]) or {}, a["args"]))
+                        _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, a["tool"], results.get(a["tool"]) or {}))
                         job = _read_job(job_id) or job
 
                 observation = "\n".join(
