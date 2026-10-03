@@ -5,7 +5,7 @@
  </style>
  <?php $yd_v = '1'; if (is_dir(__DIR__ . '/../assets/js')) { $yd_v = (string) @max(array_map('filemtime', array_filter(glob(__DIR__ . '/../assets/js/*.js') ?: [], 'is_file')) ?: [1]); } ?>
 -<script src="assets/js/think_ui.js?v=46"></script>
-+<script src="assets/js/think_ui.js?v=47"></script>
++<script src="assets/js/think_ui.js?v=48"></script>
  <script src="assets/js/yd_railway_jobs.js"></script>
  <script src="assets/js/yd_chat_core.js?v=cmds2"></script>
  <script src="assets/js/yd_text_clean.js?v=<?= htmlspecialchars($yd_v) ?>"></script>
@@ -175,7 +175,38 @@
      this.render();
    };
  
-@@ -629,10 +645,8 @@
+@@ -617,8 +633,30 @@
+     });
+   };
+ 
++  Timeline.prototype._compactAdjacentThinkingRows = function () {
++    for (var i = 1; i < this.rows.length;) {
++      var previous = this.rows[i - 1], current = this.rows[i];
++      if (previous.kind === 'think' && current.kind === 'think') {
++        var previousText = cleanThink(previous.text || '');
++        var currentText = cleanThink(current.text || '');
++        if (!previousText || !currentText || previousText === currentText) {
++          previous.text = previousText || currentText;
++          previous.state = current.state;
++          if (this._thinkId === current.id || this._thinkId === previous.id) {
++            this._thinkId = previous.id;
++            this._buf = previous.text;
++          }
++          this.rows.splice(i, 1);
++          continue;
++        }
++      }
++      i++;
++    }
++  };
++
+   Timeline.prototype.render = function () {
+     if (!this.el) return;
++    this._compactAdjacentThinkingRows();
+     var card = this.el.querySelector('[data-km-card]');
+     if (!card) return;
+     this._ensureSheet();
+@@ -629,10 +667,8 @@
        var r = this.rows[i];
        if (r.state === 'running') running = true;
        if (r.kind === 'think') {
@@ -186,7 +217,7 @@
          events.push({ kind: 'think', state: r.state, title: title, icon: 'think' });
        } else if (r.kind === 'tool') {
          toolCount++;
-@@ -677,7 +691,7 @@
+@@ -677,7 +713,7 @@
      var m = {
        clock: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
        chev: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="#141413" d="M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM12,20c-4.41,0 -8,-3.59 -8,-8s3.59,-8 8,-8 8,3.59 8,8 -3.59,8 -8,8z"/><path fill="#141413" d="M13.5,7.5L9,12l4.5,4.5 1.4,-1.4L11.8,12l3.1,-3.1z"/></svg>',
@@ -195,7 +226,7 @@
        terminal: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 7.5 4.5 4.5-4.5 4.5M12.5 17h7"/></svg>',
        file: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8Z"/><path d="M14 3v5h5M8.5 12h7M8.5 15.5h5"/></svg>',
        write: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m14.5 5.5 4 4M4 20l3.8-1 10.3-10.3a2.1 2.1 0 0 0-3-3L4.8 16Z"/><path d="M4 20h5"/></svg>',
-@@ -711,12 +725,12 @@
+@@ -711,12 +747,12 @@
        return this.timeline;
      },
      onThinkingChunk: function (c) { if (this.timeline) this.timeline.onThink(c); },
