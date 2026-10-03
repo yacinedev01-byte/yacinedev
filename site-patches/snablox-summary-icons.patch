@@ -1,14 +1,16 @@
 --- a/pages/_app.php
 +++ b/pages/_app.php
-@@ -2657,7 +2657,7 @@
+@@ -2657,8 +2657,8 @@
  body.theme-night .side__brand-mark--round{background:#1c2430!important;border-color:rgba(255,255,255,.08)!important}
  </style>
  <?php $yd_v = '1'; if (is_dir(__DIR__ . '/../assets/js')) { $yd_v = (string) @max(array_map('filemtime', array_filter(glob(__DIR__ . '/../assets/js/*.js') ?: [], 'is_file')) ?: [1]); } ?>
 -<script src="assets/js/think_ui.js?v=46"></script>
+-<script src="assets/js/yd_railway_jobs.js"></script>
 +<script src="assets/js/think_ui.js?v=48"></script>
- <script src="assets/js/yd_railway_jobs.js"></script>
++<script src="assets/js/yd_railway_jobs_v2.js"></script>
  <script src="assets/js/yd_chat_core.js?v=cmds2"></script>
  <script src="assets/js/yd_text_clean.js?v=<?= htmlspecialchars($yd_v) ?>"></script>
+ <script src="assets/js/yd_video_card.js?v=<?= htmlspecialchars($yd_v) ?>"></script>
 @@ -4983,7 +4983,7 @@
                if (data.tool_start) { toolsInFlight++; window.__YD_LAST_TOOL_ARGS__ = data.args || {}; window.__YD_LAST_TOOL_NAME__ = data.tool || ""; }
                var k0 = toolKindLabel(data.tool);
@@ -27,6 +29,20 @@
                // علبة موحّدة لكل أمر/أداة (مثل الطقس)
                try {
                  var tid = data.tool || 'tool';
+@@ -6827,3 +6827,13 @@
+ .yd-summary-step .yd-summary-step__arrow svg[aria-hidden="true"],.yd-man__sum-chev svg[aria-hidden="true"]{width:24px!important;height:24px!important}
+ .yd-man__clock svg[aria-hidden="true"]{width:17px!important;height:17px!important}
+ </style>
++
++<style id="yd-summary-compact-v49">
++/* Compact, consistent tool/thinking glyphs while preserving the existing layout. */
++.yd-summary-step .yd-summary-step__icon{width:24px!important;height:24px!important;flex:0 0 24px!important;border-radius:7px!important}
++.yd-summary-step .yd-summary-step__icon svg[aria-hidden="true"]{width:15px!important;height:15px!important}
++.yd-summary-step.is-think .yd-summary-step__icon svg[aria-hidden="true"]{width:15px!important;height:15px!important}
++.yd-summary-step .yd-summary-step__arrow{width:20px!important;height:20px!important;flex:0 0 20px!important;padding-top:2px!important}
++.yd-summary-step .yd-summary-step__arrow svg[aria-hidden="true"]{width:20px!important;height:20px!important}
++.yd-summary-step .yd-summary-step__rail{right:12px!important;top:24px!important;width:1.5px!important}
++</style>
 --- a/assets/js/think_ui.js
 +++ b/assets/js/think_ui.js
 @@ -192,9 +192,9 @@

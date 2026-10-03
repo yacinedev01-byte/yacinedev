@@ -1,0 +1,163 @@
+--- a/assets/js/yd_railway_jobs.js
++++ b/assets/js/yd_railway_jobs.js
+@@ -1,5 +1,39 @@
+ (function (w) {
+   'use strict';
++  function parseResponse(response) {
++    return response.text().then(function (raw) {
++      var text = String(raw || '').replace(/^\uFEFF/, '').trim();
++      var start = text.search(/[\[{]/);
++      if (start < 0) return { ok: false, http: response.status, error: 'رد Railway ليس JSON صالحاً' };
++      var depth = 0, quoted = false, escaped = false, end = -1;
++      for (var i = start; i < text.length; i++) {
++        var ch = text.charAt(i);
++        if (quoted) {
++          if (escaped) escaped = false;
++          else if (ch === '\\') escaped = true;
++          else if (ch === '"') quoted = false;
++          continue;
++        }
++        if (ch === '"') quoted = true;
++        else if (ch === '{' || ch === '[') depth++;
++        else if (ch === '}' || ch === ']') {
++          depth--;
++          if (depth === 0) { end = i + 1; break; }
++        }
++      }
++      if (end < 0) return { ok: false, http: response.status, error: 'استجابة Railway غير مكتملة' };
++      try {
++        var data = JSON.parse(text.slice(start, end));
++        if (data && typeof data === 'object' && !Array.isArray(data)) {
++          data.http = data.http || response.status;
++          if (!response.ok && data.ok === undefined) data.ok = false;
++        }
++        return data;
++      } catch (e) {
++        return { ok: false, http: response.status, error: 'تعذر تحليل رد Railway' };
++      }
++    });
++  }
+   function postJob(message, opts) {
+     opts = opts || {};
+     return fetch(opts.endpoint || 'api/agent_job.php', {
+@@ -13,13 +47,13 @@
+         session: opts.session || null,
+         chat_id: opts.chat_id || null
+       })
+-    }).then(function (r) { return r.json(); });
++    }).then(parseResponse);
+   }
+   function getJob(jobId, endpoint) {
+     return fetch((endpoint || 'api/agent_job.php') + '?action=status&job_id=' + encodeURIComponent(jobId), {
+       credentials: 'same-origin',
+       headers: { 'Accept': 'application/json' }
+-    }).then(function (r) { return r.json(); });
++    }).then(parseResponse);
+   }
+   function poll(jobId, onUpdate, opts) {
+     opts = opts || {};
+--- a/tools/RailwayAgentJobTool.php
++++ b/tools/RailwayAgentJobTool.php
+@@ -29,6 +29,7 @@
+         curl_setopt_array($ch, [
+             CURLOPT_RETURNTRANSFER => true,
+             CURLOPT_CUSTOMREQUEST => $method,
++            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+             CURLOPT_HTTPHEADER => $headers,
+             CURLOPT_TIMEOUT => 60,
+             CURLOPT_CONNECTTIMEOUT => 15,
+--- a/tools/RailwayCmdTool.php
++++ b/tools/RailwayCmdTool.php
+@@ -237,6 +237,7 @@
+         curl_setopt_array($ch, [
+             CURLOPT_RETURNTRANSFER => true,
+             CURLOPT_CUSTOMREQUEST => $method,
++            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+             CURLOPT_HTTPHEADER => $headers,
+             CURLOPT_TIMEOUT => 90,
+             CURLOPT_CONNECTTIMEOUT => 15,
+--- /dev/null
++++ b/assets/js/yd_railway_jobs_v2.js
+@@ -0,0 +1,82 @@
++(function (w) {
++  'use strict';
++  function parseResponse(response) {
++    return response.text().then(function (raw) {
++      var text = String(raw || '').replace(/^\uFEFF/, '').trim();
++      var start = text.search(/[\[{]/);
++      if (start < 0) return { ok: false, http: response.status, error: 'رد Railway ليس JSON صالحاً' };
++      var depth = 0, quoted = false, escaped = false, end = -1;
++      for (var i = start; i < text.length; i++) {
++        var ch = text.charAt(i);
++        if (quoted) {
++          if (escaped) escaped = false;
++          else if (ch === '\\') escaped = true;
++          else if (ch === '"') quoted = false;
++          continue;
++        }
++        if (ch === '"') quoted = true;
++        else if (ch === '{' || ch === '[') depth++;
++        else if (ch === '}' || ch === ']') {
++          depth--;
++          if (depth === 0) { end = i + 1; break; }
++        }
++      }
++      if (end < 0) return { ok: false, http: response.status, error: 'استجابة Railway غير مكتملة' };
++      try {
++        var data = JSON.parse(text.slice(start, end));
++        if (data && typeof data === 'object' && !Array.isArray(data)) {
++          data.http = data.http || response.status;
++          if (!response.ok && data.ok === undefined) data.ok = false;
++        }
++        return data;
++      } catch (e) {
++        return { ok: false, http: response.status, error: 'تعذر تحليل رد Railway' };
++      }
++    });
++  }
++  function postJob(message, opts) {
++    opts = opts || {};
++    return fetch(opts.endpoint || 'api/agent_job.php', {
++      method: 'POST',
++      credentials: 'same-origin',
++      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
++      body: JSON.stringify({
++        action: 'start',
++        message: message,
++        max_steps: opts.max_steps || 8,
++        session: opts.session || null,
++        chat_id: opts.chat_id || null
++      })
++    }).then(parseResponse);
++  }
++  function getJob(jobId, endpoint) {
++    return fetch((endpoint || 'api/agent_job.php') + '?action=status&job_id=' + encodeURIComponent(jobId), {
++      credentials: 'same-origin',
++      headers: { 'Accept': 'application/json' }
++    }).then(parseResponse);
++  }
++  function poll(jobId, onUpdate, opts) {
++    opts = opts || {};
++    var interval = opts.interval || 2000;
++    var endpoint = opts.endpoint || 'api/agent_job.php';
++    var stopped = false;
++    function tick() {
++      if (stopped) return;
++      getJob(jobId, endpoint).then(function (data) {
++        if (typeof onUpdate === 'function') onUpdate(data);
++        var st = data && data.job && data.job.status;
++        if (st === 'done' || st === 'error' || st === 'cancelled') {
++          stopped = true;
++          return;
++        }
++        setTimeout(tick, interval);
++      }).catch(function () {
++        if (!stopped) setTimeout(tick, interval * 2);
++      });
++    }
++    tick();
++    return function stop() { stopped = true; };
++  }
++  w.YD = w.YD || {};
++  w.YD.RailwayJobs = { start: postJob, status: getJob, poll: poll };
++})(window);
