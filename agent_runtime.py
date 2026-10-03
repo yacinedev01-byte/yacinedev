@@ -10,7 +10,6 @@ import os
 import re
 import threading
 import time
-import uuid
 import traceback
 import urllib.error
 import urllib.request
@@ -25,35 +24,6 @@ bp = Blueprint("agent_runtime", __name__)
 WORKROOT: Path = Path(os.environ.get("SHELL_WORKROOT", "/tmp/yd_sandbox"))
 _jobs_lock = threading.RLock()
 _threads: dict[str, threading.Thread] = {}
-
-_PLATFORM_BRIDGED_TOOLS = {
-    "weather", "qr", "zip", "time", "web-search", "search", "search-hub", "multi-search",
-    "web-fetch", "open-url", "browser-open", "movies", "films", "movie", "wiki-images",
-    "wikipedia", "wiki", "images", "calculator", "calc", "translator", "translate",
-    "summarizer", "summarize", "unit-converter", "convert", "video", "videos", "youtube",
-    "film-clip", "simple-image", "image-gen", "generate-image", "create-image", "browser-info",
-    "browser-diagnostics", "workspace", "computer", "computer-workspace", "snablox",
-    "workspace-ls", "snablox-ls", "workspace-read", "snablox-read", "workspace-write",
-    "snablox-write", "workspace-unzip", "snablox-unzip", "workspace-mkdir", "snablox-mkdir",
-    "workspace-rm", "snablox-rm", "workspace-info", "snablox-info", "workspace-tree",
-    "snablox-tree", "tree", "workspace-find", "snablox-find", "find", "workspace-diff",
-    "snablox-diff", "python", "python-run", "python-list", "python-register", "python-analyze",
-    "javascript", "javascript-run", "javascript-analyze", "node", "node-run", "apk-plan",
-    "apk-code", "apk-build", "apk-full", "apklab", "fb-video", "facebook-video", "facebook",
-    "yt", "shell-exec", "run-command", "railway-cmd", "cmd",
-}
-
-
-def _is_platform_tool(tool: str) -> bool:
-    return str(tool or "").strip().lower().replace("_", "-") in _PLATFORM_BRIDGED_TOOLS
-
-
-def _tool_result_path(job_id: str, call_id: str) -> Path:
-    safe_job = re.sub(r"[^a-zA-Z0-9_\-]", "", job_id)[:64]
-    safe_call = re.sub(r"[^a-zA-Z0-9_\-]", "", call_id)[:64]
-    d = _jobs_dir() / "_tool_results"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"{safe_job}_{safe_call}.json"
 
 
 def _jobs_dir() -> Path:
@@ -295,9 +265,8 @@ INPUT: {json}
 def _parse_action(text: str) -> tuple[Optional[str], Optional[dict], str]:
     """Return (tool, args, remaining_text) -- يبقى للتوافق مع أي كود قديم يستدعيه."""
     m = re.search(
-        r"(?:ACTION|Action):\s*([a-zA-Z0-9_\-]+)\s*\n\s*(?:INPUT|Action Input):\s*(\{[\s\S]*?\})(?:\s*$|\n)",
+        r"ACTION:\s*([a-zA-Z0-9_\-]+)\s*\n\s*INPUT:\s*(\{[\s\S]*?\})(?:\s*$|\n)",
         text,
-        re.IGNORECASE,
     )
     if not m:
         return None, None, text
@@ -311,8 +280,7 @@ def _parse_action(text: str) -> tuple[Optional[str], Optional[dict], str]:
 
 
 _ACTIONS_RE = re.compile(
-    r"(?:ACTION|Action):\s*([a-zA-Z0-9_\-]+)\s*\n\s*(?:INPUT|Action Input):\s*(\{[\s\S]*?\})(?=\n\s*\n(?:ACTION|Action):|\n\s*(?:ACTION|Action):|\s*$)",
-    re.IGNORECASE,
+    r"ACTION:\s*([a-zA-Z0-9_\-]+)\s*\n\s*INPUT:\s*(\{[\s\S]*?\})(?=\n\s*\nACTION:|\n\s*ACTION:|\s*$)",
 )
 
 
@@ -357,92 +325,9 @@ def _fire_webhook(event: str, job: dict) -> None:
         pass
 
 
-def _request_platform_tool(job_id: str, tool: str, args: dict, timeout: int = 180) -> dict:
-    job = _read_job(job_id)
-    if not job or not job.get("platform_bridge_enabled"):
-        return {"ok": False, "error": "أدوات المنصة غير مفعّلة لهذه المهمة"}
-    call_id = uuid.uuid4().hex
-    job["pending_platform_tool"] = {
-        "id": call_id,
-        "tool": tool,
-        "args": args if isinstance(args, dict) else {},
-        "requested_at": time.time(),
-    }
-    _append_event(job, "platform_tool_call", tool=tool, args=args or {}, tool_call_id=call_id)
-    deadline = time.monotonic() + max(10, timeout)
-    result_path = _tool_result_path(job_id, call_id)
-    while time.monotonic() < deadline:
-        current = _read_job(job_id)
-        if not current or current.get("cancel") or current.get("status") == "cancelled":
-            if current:
-                current["pending_platform_tool"] = None
-                _write_job(current)
-            return {"ok": False, "error": "أُلغيت المهمة قبل اكتمال أداة المنصة"}
-        if result_path.is_file():
-            try:
-                payload = json.loads(result_path.read_text(encoding="utf-8"))
-                result_path.unlink(missing_ok=True)
-                current["pending_platform_tool"] = None
-                _write_job(current)
-                result = payload.get("result") if isinstance(payload, dict) else None
-                return result if isinstance(result, dict) else {"ok": False, "error": "نتيجة أداة المنصة غير صالحة"}
-            except Exception as exc:
-                result_path.unlink(missing_ok=True)
-                return {"ok": False, "error": "تعذر قراءة نتيجة أداة المنصة: " + str(exc)[:200]}
-        time.sleep(0.25)
-    current = _read_job(job_id)
-    if current:
-        current["pending_platform_tool"] = None
-        _write_job(current)
-    return {"ok": False, "error": "انتهت مهلة أداة المنصة؛ اترك تبويب المنصة مفتوحًا أثناء استخدام Snablox"}
-
-
-def _tool_progress_block(step: int, max_steps: int, tool: str, result: dict) -> str:
-    result = result if isinstance(result, dict) else {"result": result}
-    if result.get("ok") is True:
-        status = "اكتمل بنجاح."
-    elif result.get("ok") is False:
-        status = "لم يكتمل بنجاح؛ سأوضح السبب في النتيجة."
-    else:
-        status = "وصلت نتيجة الأداة."
-
-    detail = "استُلمت المخرجات، دون عرض محتوى الملفات أو البيانات الطويلة هنا."
-    for key, label in (("error", "السبب"), ("summary", "الخلاصة"), ("title", "العنوان"), ("path", "المسار"), ("count", "عدد النتائج"), ("files_count", "عدد الملفات"), ("status", "الحالة"), ("query", "البحث")):
-        value = result.get(key)
-        if value not in (None, "", [], {}):
-            text = re.sub(r"\s+", " ", str(value)).strip()
-            text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[محجوب]", text)
-            text = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*)[^\s,;]+", r"\1[محجوب]", text)
-            detail = f"{label}: {text[:115]}"
-            break
-    next_step = "سأتابع اعتمادًا على النتيجة." if step < max_steps else "سأنتقل إلى خلاصة المهمة."
-    return "\n".join([
-        f"تحديث المهمة — الخطوة {step}/{max_steps}",
-        f"الأداة/الأمر: {tool}",
-        f"الحالة: {status}",
-        f"النتيجة: {detail}",
-        f"التالي: {next_step}",
-    ]) + "\n"
-
-
-def _initial_task_plan(message: str) -> str:
-    goal = re.sub(r"\s+", " ", str(message or "")).strip()[:100]
-    return "\n".join([
-        "خطة المهمة:",
-        f"1. الهدف: {goal or 'تنفيذ طلبك' }",
-        "2. اختيار الأدوات المناسبة، واستخدام Snablox إذا احتاجت المهمة ملفات المنصة.",
-        "3. تنفيذ الخطوات والتحقق من النتائج المتاحة.",
-        "4. تلخيص ما أُنجز وذكر أي خطوة ما زالت مطلوبة.",
-    ]) + "\n"
-
-
-def _execute_tool(tool: str, args: dict, session: str, job_id: Optional[str] = None) -> dict:
+def _execute_tool(tool: str, args: dict, session: str) -> dict:
     args = dict(args or {})
     args.setdefault("session", session)
-    if _is_platform_tool(tool):
-        if not job_id:
-            return {"ok": False, "error": "لا يوجد معرّف مهمة لجسر أدوات المنصة"}
-        return _request_platform_tool(job_id, tool.replace("-", "_"), args)
     if tool in {"shell", "shell-exec", "run-command"}:
         return _run_shell(str(args.get("cmd") or args.get("command") or ""), session)
     # normalize aliases
@@ -458,7 +343,7 @@ def _execute_tool(tool: str, args: dict, session: str, job_id: Optional[str] = N
     return _internal_cmd(tool, args)
 
 
-def _worker(job_id: str, platform_context: str = "") -> None:
+def _worker(job_id: str) -> None:
     job = _read_job(job_id)
     if not job:
         return
@@ -471,11 +356,8 @@ def _worker(job_id: str, platform_context: str = "") -> None:
         session = str(job.get("session") or job_id)
         max_steps = max(1, min(int(job.get("max_steps") or 8), 20))
         display = str(job.get("display_name") or "user")
-        platform_context = platform_context or str(job.get("platform_context") or "")
 
         _append_event(job, "thinking", text=f"بدء المهمة على Railway (جلسة {session})…\n")
-        job = _read_job(job_id) or job
-        _append_event(job, "thinking", text=_initial_task_plan(message))
         job = _read_job(job_id) or job
 
         cfg = _llm_config()
@@ -490,8 +372,6 @@ def _worker(job_id: str, platform_context: str = "") -> None:
             plan = _internal_cmd("plan", {"goal": message, "session": session})
             _append_event(job, "tool", tool="plan", result=plan)
             job = _read_job(job_id) or job
-            _append_event(job, "thinking", text=_tool_progress_block(1, max_steps, "plan", plan))
-            job = _read_job(job_id) or job
             answer = (
                 "## نتيجة (وضع بدون LLM)\n\n"
                 "تم حفظ الخطة على Railway. أضف متغير **KIMI_API_KEY** "
@@ -503,24 +383,12 @@ def _worker(job_id: str, platform_context: str = "") -> None:
             job = _read_job(job_id) or job
             job["status"] = "done"
             job["finished_at"] = time.time()
-            job.pop("platform_context", None)
             _write_job(job)
             _fire_webhook("job.done", job)
             return
 
-        system_prompt = SYSTEM_PROMPT
-        if platform_context:
-            system_prompt += (
-                "\n\nتعليمات YACINEDEV الأصلية وأوصاف أدوات المنصة (مصدرها خادم المنصة الموثوق):\n"
-                + platform_context[:30000]
-                + "\n\nبروتوكول التنفيذ الملزم لهذا API: عند طلب أداة اكتب ACTION: tool_name ثم INPUT: {JSON}. "
-                "يمكن استخدام أسماء الأدوات الموصوفة أعلاه؛ الأدوات الخاصة بالمنصة تُنفذ عبر جسر جلسة المستخدم إلى PHP/Snablox. "
-                "لا تستخدم مساحة fs على Railway بدلاً من workspace/Snablox الخاصة بالمستخدم. "
-                "لا تعرض التفكير الداخلي أو خطوات الاستدلال؛ أرسل تحديث تقدم موجزاً فقط، ثم الإجابة النهائية بالعربية."
-            )
-
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": f"المستخدم ({display}) يقول:\n{message}",
@@ -553,20 +421,15 @@ def _worker(job_id: str, platform_context: str = "") -> None:
 
             actions, preface = _parse_actions(content)
             if preface:
-                _append_event(job, "thinking", text="تم تحديد الخطوة المناسبة، جارٍ تنفيذها.\n")
+                _append_event(job, "thinking", text=preface[:3000] + "\n")
                 job = _read_job(job_id) or job
 
             if not actions:
                 # final answer
-                final_answer = content.strip()
-                final_match = re.search(r"(?:^|\n)\s*Final Answer\s*:\s*([\s\S]*)$", final_answer, re.IGNORECASE)
-                if final_match:
-                    final_answer = final_match.group(1).strip()
-                _append_event(job, "answer", text=final_answer)
+                _append_event(job, "answer", text=content.strip())
                 job = _read_job(job_id) or job
                 job["status"] = "done"
                 job["finished_at"] = time.time()
-                job.pop("platform_context", None)
                 _write_job(job)
                 _fire_webhook("job.done", job)
                 return
@@ -575,10 +438,8 @@ def _worker(job_id: str, platform_context: str = "") -> None:
                 tool, args = actions[0]["tool"], actions[0]["args"]
                 _append_event(job, "thinking", text=f"تنفيذ أداة: {tool}\n")
                 job = _read_job(job_id) or job
-                result = _execute_tool(tool, args or {}, session, job_id)
+                result = _execute_tool(tool, args or {}, session)
                 _append_event(job, "tool", tool=tool, args=args, result=result)
-                job = _read_job(job_id) or job
-                _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, tool, result))
                 job = _read_job(job_id) or job
 
                 messages.append({"role": "assistant", "content": content})
@@ -599,36 +460,21 @@ def _worker(job_id: str, platform_context: str = "") -> None:
                 job = _read_job(job_id) or job
 
                 results: dict[str, dict] = {}
-                if any(_is_platform_tool(a["tool"]) for a in actions):
-                    # Platform tools share one authenticated browser session; serialize them.
-                    for a in actions:
-                        tname = a["tool"]
+                with ThreadPoolExecutor(max_workers=3) as ex:
+                    futures = {
+                        ex.submit(_execute_tool, a["tool"], a["args"] or {}, session): a["tool"]
+                        for a in actions
+                    }
+                    for fut in as_completed(futures):
+                        tname = futures[fut]
                         try:
-                            results[tname] = _execute_tool(tname, a["args"] or {}, session, job_id)
+                            results[tname] = fut.result()
                         except Exception as e:
                             results[tname] = {"ok": False, "error": str(e)}
-                        job = _read_job(job_id) or job
-                        _append_event(job, "tool", tool=tname, args=a["args"], result=results[tname])
-                        job = _read_job(job_id) or job
-                        _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, tname, results[tname]))
-                else:
-                    with ThreadPoolExecutor(max_workers=3) as ex:
-                        futures = {
-                            ex.submit(_execute_tool, a["tool"], a["args"] or {}, session, job_id): a["tool"]
-                            for a in actions
-                        }
-                        for fut in as_completed(futures):
-                            tname = futures[fut]
-                            try:
-                                results[tname] = fut.result()
-                            except Exception as e:
-                                results[tname] = {"ok": False, "error": str(e)}
 
-                    for a in actions:
-                        _append_event(job, "tool", tool=a["tool"], args=a["args"], result=results.get(a["tool"]))
-                        job = _read_job(job_id) or job
-                        _append_event(job, "thinking", text=_tool_progress_block(step + 1, max_steps, a["tool"], results.get(a["tool"]) or {}))
-                        job = _read_job(job_id) or job
+                for a in actions:
+                    _append_event(job, "tool", tool=a["tool"], args=a["args"], result=results.get(a["tool"]))
+                    job = _read_job(job_id) or job
 
                 observation = "\n".join(
                     f"نتيجة الأداة {t}:\n{json.dumps(r, ensure_ascii=False)[:4000]}"
@@ -658,14 +504,10 @@ def _worker(job_id: str, platform_context: str = "") -> None:
         except Exception as e:
             final = "تعذر التلخيص: " + str(e)
         job = _read_job(job_id) or job
-        final_match = re.search(r"(?:^|\n)\s*Final Answer\s*:\s*([\s\S]*)$", final.strip(), re.IGNORECASE)
-        if final_match:
-            final = final_match.group(1).strip()
         _append_event(job, "answer", text=final)
         job = _read_job(job_id) or job
         job["status"] = "done"
         job["finished_at"] = time.time()
-        job.pop("platform_context", None)
         _write_job(job)
         _fire_webhook("job.done", job)
     except Exception as e:
@@ -674,17 +516,16 @@ def _worker(job_id: str, platform_context: str = "") -> None:
         job["error"] = str(e)
         job["trace"] = traceback.format_exc()[-2000:]
         job["finished_at"] = time.time()
-        job.pop("platform_context", None)
         _write_job(job)
         _fire_webhook("job.error", job)
 
 
-def _start_thread(job_id: str, platform_context: str = "") -> None:
+def _start_thread(job_id: str) -> None:
     with _jobs_lock:
         t = _threads.get(job_id)
         if t and t.is_alive():
             return
-        th = threading.Thread(target=_worker, args=(job_id, platform_context), daemon=True, name=f"job-{job_id}")
+        th = threading.Thread(target=_worker, args=(job_id,), daemon=True, name=f"job-{job_id}")
         _threads[job_id] = th
         th.start()
 
@@ -701,14 +542,9 @@ def create_job():
     if not message:
         return jsonify(ok=False, error="message مطلوب"), 400
 
-    job_id = str(data.get("job_id") or ("job_" + str(int(time.time())) + "_" + str(os.getpid()) + "_" + uuid.uuid4().hex[:8]))
+    job_id = str(data.get("job_id") or ("job_" + str(int(time.time())) + "_" + str(os.getpid())))
     job_id = re.sub(r"[^a-zA-Z0-9_\-]", "", job_id)[:64]
     session = re.sub(r"[^a-zA-Z0-9_\-]", "", str(data.get("session") or job_id))[:64]
-    platform_context = str(data.get("platform_context") or "")[:30000]
-    platform_bridge_enabled = bool(data.get("platform_bridge")) and bool(platform_context)
-    existing = _read_job(job_id)
-    if existing and existing.get("status") in {"queued", "running"}:
-        return jsonify(ok=False, error="job_id قيد الاستخدام بالفعل"), 409
 
     job = {
         "id": job_id,
@@ -718,8 +554,6 @@ def create_job():
         "chat_id": data.get("chat_id"),
         "display_name": str(data.get("display_name") or "user")[:80],
         "max_steps": max(1, min(int(data.get("max_steps") or 8), 20)),
-        "platform_context": platform_context,
-        "platform_bridge_enabled": platform_bridge_enabled,
         "created_at": time.time(),
         "thinking": "",
         "answer": "",
@@ -727,14 +561,14 @@ def create_job():
         "llm_configured": bool(_llm_config()["api_key"]),
     }
     _write_job(job)
-    _start_thread(job_id, platform_context)
+    _start_thread(job_id)
     return jsonify(
         ok=True,
         job_id=job_id,
         status="queued",
         poll_url=f"/agent/jobs/{job_id}",
         llm_configured=job["llm_configured"],
-        note="المهمة تعمل على Railway حتى لو أغلقت المتصفح؛ أدوات مساحة Snablox تحتاج بقاء تبويب المنصة مفتوحًا.",
+        note="المهمة تعمل على Railway حتى لو أغلقت المتصفح. استطلع الحالة عبر GET.",
     )
 
 
@@ -745,37 +579,8 @@ def get_job(job_id: str):
         return jsonify(ok=False, error="المهمة غير موجودة"), 404
     # resume thread if server restarted mid-job
     if job.get("status") in {"queued", "running"}:
-        _start_thread(job_id, str(job.get("platform_context") or ""))
-    public_job = dict(job)
-    public_job.pop("platform_context", None)
-    return jsonify(ok=True, job=public_job)
-
-
-@bp.post("/jobs/<job_id>/tool-result")
-def submit_platform_tool_result(job_id: str):
-    job = _read_job(job_id)
-    if not job:
-        return jsonify(ok=False, error="المهمة غير موجودة"), 404
-    pending = job.get("pending_platform_tool") or {}
-    data = request.get_json(silent=True) or {}
-    call_id = re.sub(r"[^a-zA-Z0-9_\-]", "", str(data.get("tool_call_id") or ""))[:64]
-    if not call_id or call_id != str(pending.get("id") or ""):
-        return jsonify(ok=False, error="طلب الأداة غير مطابق أو انتهت صلاحيته"), 409
-    if job.get("status") not in {"running", "queued"}:
-        return jsonify(ok=False, error="المهمة لم تعد نشطة"), 409
-    result = data.get("result")
-    if not isinstance(result, dict):
-        result = {"ok": False, "error": "نتيجة الأداة ليست كائن JSON"}
-    encoded = json.dumps({"result": result}, ensure_ascii=False).encode("utf-8")
-    if len(encoded) > 1_000_000:
-        return jsonify(ok=False, error="نتيجة الأداة أكبر من الحد المسموح"), 413
-    path = _tool_result_path(job_id, call_id)
-    if path.exists():
-        return jsonify(ok=True, duplicate=True)
-    tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    tmp.write_bytes(encoded)
-    tmp.replace(path)
-    return jsonify(ok=True, received=True)
+        _start_thread(job_id)
+    return jsonify(ok=True, job=job)
 
 
 @bp.get("/jobs")
@@ -807,7 +612,6 @@ def cancel_job(job_id: str):
     if job.get("status") in {"queued", "running"}:
         job["status"] = "cancelled"
         job["finished_at"] = time.time()
-        job.pop("platform_context", None)
         _write_job(job)
         _fire_webhook("job.cancelled", job)
     else:
