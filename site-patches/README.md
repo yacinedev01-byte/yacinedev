@@ -11,10 +11,14 @@ git apply site-patches/snablox-summary-icons.patch
 
 git apply --check site-patches/snablox-railway-bridge.patch
 git apply site-patches/snablox-railway-bridge.patch
+
+git apply --check site-patches/snablox-login-viewport.patch
+git apply site-patches/snablox-login-viewport.patch
 ```
 
 - `snablox-mobile-black-screen.patch` fixes mobile viewport expansion and keeps chat URL synchronization inside its application closure.
 - `snablox-summary-icons.patch` uses the supplied Android Vector path for the thinking icon and the circular SVG arrow. It renders the actual `thinking → tool → thinking → tool` sequence, shows streamed thought text beside its icon, merges an adjacent empty thinking row into the following real thought, and suppresses replayed SSE events by step ID. It restores icons hidden by the legacy global SVG rule, aligns 24px icon boxes and the timeline to one center axis, and renders the rail as a 1px thread.
 - `snablox-railway-bridge.patch` pins PHP cURL requests to HTTP/1.1, parses the JSON response even when the host appends HTML after it, and adds a versioned polling asset to avoid stale static-file caches.
+- `snablox-login-viewport.patch` replaces the login honeypot's `left:-9999px` placement with clipped off-screen hiding so it cannot expand the RTL page to thousands of pixels, and cache-busts the auth stylesheet using its server file modification time.
 
 The deployment's private `config/secrets.php` must point `shell_api_url` at the currently deployed Railway service origin. Keep `shell_api_key`, session tokens, and the entire secrets file private; they are intentionally excluded from this repository and all patches. The deployment's stale Railway hostname has been corrected without changing its API key. Job-step limits remain unchanged; the Summary display does not disable them.

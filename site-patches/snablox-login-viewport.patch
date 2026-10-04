@@ -1,0 +1,22 @@
+--- a/assets/css/auth.css
++++ b/assets/css/auth.css
+@@ -197,7 +197,7 @@
+ .shell{padding:24px 16px 32px}.brand{margin-bottom:20px}.brand__mark{width:62px;height:62px;border-radius:50%!important;background:#111!important;box-shadow:0 12px 24px rgba(0,0,0,.16)!important}.brand__title{font-weight:800!important;letter-spacing:-.02em}.brand__sub{font-weight:600;color:#777!important}
+ .card{border-color:rgba(17,17,17,.11)!important;border-radius:24px!important;box-shadow:0 18px 45px rgba(0,0,0,.09)!important;padding:26px 24px 22px}.tabs{background:#f0f0f1!important}.tab.is-active{background:#111!important;box-shadow:0 7px 15px rgba(0,0,0,.16)!important}.panel__head h1{font-weight:800!important}.field label{font-weight:800!important}.input{border-radius:999px!important;background:#fafafa!important}.input:focus-within{border-color:#111!important;box-shadow:0 0 0 4px rgba(17,17,17,.08)!important}.input__btn{border-radius:50%!important}.btn{border-radius:999px!important;background:#111!important;box-shadow:0 10px 22px rgba(0,0,0,.16)!important;font-weight:800!important}.btn--ghost{background:#fff!important;color:#333!important;box-shadow:none!important}.check input{border-radius:50%!important}.check input:checked{background:#111!important;border-color:#111!important}
+ .alert.err{background:#f5f5f5!important;border-color:#c9c9c9!important;color:#222!important}.alert.ok{background:#f1f1f1!important;border-color:#c7c7c7!important;color:#111!important}
+-.yd-bot-trap{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;left:-9999px!important}.yd-bot-trap input{position:absolute!important}
++.yd-bot-trap{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;opacity:0!important;pointer-events:none!important;clip:rect(0,0,0,0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;left:0!important;top:0!important}.yd-bot-trap input{position:absolute!important;left:0!important;top:0!important}
+ 
+ /* ================================================
+    YACINEDEV — Perplexity Dark Theme Override
+--- a/includes/layout_start.php
++++ b/includes/layout_start.php
+@@ -20,7 +20,7 @@
+ <link rel="preconnect" href="https://fonts.googleapis.com"/>
+ <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+ <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=Outfit:wght@600;700&display=swap" rel="stylesheet"/>
+-<link rel="stylesheet" href="assets/css/auth.css"/>
++<link rel="stylesheet" href="assets/css/auth.css?v=<?= (int) (@filemtime(__DIR__ . '/../assets/css/auth.css') ?: 1) ?>"/>
+ <script src="captcha/sitekey.js"></script>
+ </head>
+ <body class="auth-body">
