@@ -12,4 +12,5 @@ COPY app.py agent_cmds.py agent_runtime.py kimi_chat.py metrics.py webhooks.py c
 
 ENV SHELL_WORKROOT=/tmp/yd_sandbox
 EXPOSE 8080
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8080", "--timeout", "150", "app:app"]
+# جلسات Playwright محفوظة في ذاكرة العملية؛ عامل واحد يمنع انتقال الطلبات إلى سياق متصفح منفصل.
+CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:8080", "--timeout", "150", "app:app"]

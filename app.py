@@ -84,18 +84,51 @@ def _safe_url(url: str) -> str:
     parsed = urlparse(str(url).strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("الرابط يجب أن يبدأ بـ http:// أو https://")
+    if parsed.username or parsed.password:
+        raise ValueError("بيانات الدخول داخل الرابط غير مسموح بها")
+    try:
+        if parsed.port not in {None, 80, 443}:
+            raise ValueError("المنافذ غير القياسية غير مسموح بها")
+    except ValueError as exc:
+        if "port" in str(exc).lower():
+            raise ValueError("منفذ الرابط غير صالح") from exc
+        raise
     host = parsed.hostname.lower().rstrip(".")
-    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+    if host in {"localhost", "localhost.localdomain"} or host.endswith((".localhost", ".local", ".internal")):
         raise ValueError("الوصول إلى عناوين داخلية غير مسموح")
     try:
         addresses = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
         for item in addresses:
             ip = ipaddress.ip_address(item[4][0])
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            if not ip.is_global:
                 raise ValueError("الوصول إلى الشبكات الداخلية غير مسموح")
     except socket.gaierror as exc:
         raise ValueError(f"تعذر حل اسم النطاق: {exc}")
-    return url
+    return parsed.geturl()
+
+def _browser_request_is_public(raw_url: str) -> bool:
+    parsed = urlparse(str(raw_url))
+    if parsed.scheme not in {"http", "https"}:
+        return parsed.scheme in {"about", "data", "blob"}
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.username or parsed.password or not host or host in {"localhost", "localhost.localdomain"} or host.endswith((".localhost", ".local", ".internal")):
+        return False
+    try:
+        if parsed.port not in {None, 80, 443}:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return all(ipaddress.ip_address(item[4][0]).is_global for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+    except (OSError, ValueError):
+        return False
+
+def _route_browser_request(route) -> None:
+    try:
+        if _browser_request_is_public(route.request.url):
+            route.continue_()
+        else:
+            route.abort("blockedbyclient")
+    except Exception:
+        route.abort("blockedbyclient")
 
 def _browser_context(session: str):
     global _browser_runtime
@@ -109,6 +142,7 @@ def _browser_context(session: str):
         if ctx is None:
             browser = _browser_runtime.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             ctx = browser.new_context(viewport={"width": 1280, "height": 900}, java_script_enabled=True)
+            ctx.route("**/*", _route_browser_request)
             _browser_contexts[session] = ctx
         pages = ctx.pages
         page = pages[0] if pages else ctx.new_page()
@@ -382,7 +416,21 @@ def reset():
 def _browser_response(session: str, page):
     title = page.title()
     text = page.locator("body").inner_text(timeout=5000) if page.locator("body").count() else ""
-    return {"ok": True, "session": session, "url": page.url, "title": title, "text": text[:MAX_BROWSER_TEXT], "truncated": len(text) > MAX_BROWSER_TEXT}
+    elements = page.evaluate("""() => {
+      const visible = (el) => { const r = el.getBoundingClientRect(), s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'; };
+      return Array.from(document.querySelectorAll('a[href],button,input,textarea,select,[role="button"],[role="link"]'))
+        .filter(visible).slice(0, 80).map((el, i) => {
+          const ref = String(i + 1); el.setAttribute('data-yd-agent-ref', ref);
+          const type = (el.getAttribute('type') || '').toLowerCase();
+          let safeHref = '';
+          if (el.tagName === 'A' && el.href) { try { const u = new URL(el.href); safeHref = u.origin + u.pathname; } catch {} }
+          return {ref: i + 1, tag: el.tagName.toLowerCase(), type,
+            text: (el.innerText || (/^(submit|button|reset)$/.test(type) ? (el.value || '') : '')).trim().slice(0, 180), label: (el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 180),
+            placeholder: (el.getAttribute('placeholder') || '').slice(0, 120), name: (el.getAttribute('name') || '').slice(0, 120),
+            href: safeHref.slice(0, 300)};
+        });
+    }""")
+    return {"ok": True, "session": session, "url": page.url, "title": title, "text": text[:MAX_BROWSER_TEXT], "truncated": len(text) > MAX_BROWSER_TEXT, "elements": elements}
 
 @app.post("/browser/navigate")
 def browser_navigate():
@@ -412,9 +460,38 @@ def browser_click():
     try:
         session, _, page = _browser_context(data.get("session") or "default")
         selector = str(data.get("selector") or "").strip()
+        ref = data.get("ref")
+        if ref is not None:
+            try:
+                ref = int(ref)
+            except (TypeError, ValueError):
+                return jsonify(ok=False, error="مرجع العنصر غير صالح"), 400
+            if ref < 1 or ref > 80:
+                return jsonify(ok=False, error="مرجع العنصر خارج النطاق"), 400
+            selector = f'[data-yd-agent-ref="{ref}"]'
         if not selector or len(selector) > 500:
-            return jsonify(ok=False, error="selector مطلوب"), 400
-        page.locator(selector).first.click(timeout=BROWSER_TIMEOUT_MS)
+            return jsonify(ok=False, error="أرسل ref من لقطة الصفحة أو selector صالحاً"), 400
+        locator = page.locator(selector).first
+        meta = locator.evaluate("""el => { const type = (el.getAttribute('type') || '').toLowerCase(); let safeHref = '';
+          if (el.tagName === 'A' && el.href) { try { const u = new URL(el.href); safeHref = u.origin + u.pathname; } catch {} }
+          return {tag: el.tagName.toLowerCase(), type,
+            text: (el.innerText || (/^(submit|button|reset)$/.test(type) ? (el.value || '') : '')).trim().slice(0, 180),
+            label: (el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 180),
+            href: safeHref, form: el.form ? (el.form.innerText || '') : ''}; }""")
+        action_label = " ".join(str(meta.get(k) or "") for k in ("text", "label", "href"))
+        form_context = str(meta.get("form") or "")[:1000]
+        high_impact = re.compile(r"(?:buy|purchase|pay|checkout|place\s+order|submit|send|post|publish|delete|remove|transfer|confirm|save\s+changes|unsubscribe|cancel\s+subscription|شراء|ادفع|دفع|إتمام\s+الطلب|تأكيد|إرسال|نشر|حذف|إزالة|تحويل|إلغاء\s+الاشتراك|حفظ\s+التغييرات)", re.I)
+        search_action = re.compile(r"(?:search|find|lookup|filter|بحث|ابحث|تصفية|انتقال)", re.I)
+        is_submit = meta.get("type") == "submit" or (meta.get("tag") == "button" and bool(meta.get("form")))
+        requires_confirmation = bool(high_impact.search(action_label)) or (is_submit and not search_action.search(action_label + " " + form_context))
+        page_origin = urlparse(page.url).scheme + "://" + (urlparse(page.url).netloc or "unknown-site")
+        action_summary = ((action_label[:180] or "إرسال نموذج الصفحة") + " at " + page_origin)[:300]
+        supplied_summary = re.sub(r"\s+", " ", str(data.get("action_summary") or "").strip()).casefold()
+        exact_summary = supplied_summary == re.sub(r"\s+", " ", action_summary.strip()).casefold()
+        if requires_confirmation and (not bool(data.get("confirmed")) or not exact_summary):
+            return jsonify(ok=False, requires_confirmation=True, action_summary=action_summary, url=page.url,
+                           error="يتطلب هذا الإجراء موافقة صريحة من المستخدم قبل تنفيذه."), 409
+        locator.click(timeout=BROWSER_TIMEOUT_MS)
         page.wait_for_timeout(300)
         return jsonify(_browser_response(session, page))
     except PlaywrightTimeoutError:
@@ -429,9 +506,25 @@ def browser_type():
         session, _, page = _browser_context(data.get("session") or "default")
         selector = str(data.get("selector") or "").strip()
         text = str(data.get("text") or "")
-        if not selector or len(selector) > 500 or len(text) > 50_000:
+        ref = data.get("ref")
+        if ref is not None:
+            try:
+                ref = int(ref)
+            except (TypeError, ValueError):
+                return jsonify(ok=False, error="مرجع العنصر غير صالح"), 400
+            if ref < 1 or ref > 80:
+                return jsonify(ok=False, error="مرجع العنصر خارج النطاق"), 400
+            selector = f'[data-yd-agent-ref="{ref}"]'
+        if not selector or len(selector) > 500 or len(text) > 5_000:
             return jsonify(ok=False, error="selector/text غير صالح"), 400
-        page.locator(selector).first.fill(text, timeout=BROWSER_TIMEOUT_MS)
+        locator = page.locator(selector).first
+        meta = locator.evaluate("""el => ({type: (el.getAttribute('type') || '').toLowerCase(), name: (el.getAttribute('name') || '').toLowerCase(),
+          id: (el.id || '').toLowerCase(), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(),
+          label: (el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').toLowerCase()})""")
+        sensitive = re.compile(r"(?:password|passwd|secret|token|otp|one-time-code|credit|card|cvv|cvc|iban|bank|ssn|pin|كلمة\s*المرور|رمز\s*(?:التحقق|سري)|بطاقة|حساب\s*بنكي)", re.I)
+        if meta.get("type") == "password" or any(sensitive.search(str(meta.get(k) or "")) for k in ("name", "id", "autocomplete", "label")):
+            return jsonify(ok=False, error="الكتابة في حقول كلمات المرور أو بيانات الدفع/الرموز الحساسة غير مسموحة."), 403
+        locator.fill(text, timeout=BROWSER_TIMEOUT_MS)
         return jsonify(_browser_response(session, page))
     except PlaywrightTimeoutError:
         return jsonify(ok=False, error="تعذر الكتابة ضمن المهلة"), 504
@@ -443,10 +536,10 @@ def browser_screenshot():
     data = request.get_json(silent=True) or {}
     try:
         session, _, page = _browser_context(data.get("session") or "default")
-        raw = page.screenshot(type="png", full_page=bool(data.get("full_page")))
+        raw = page.screenshot(type="jpeg", quality=68, full_page=bool(data.get("full_page")))
         if len(raw) > MAX_SCREENSHOT:
             return jsonify(ok=False, error="الصورة أكبر من الحد المسموح"), 413
-        return jsonify(ok=True, session=session, url=page.url, mime="image/png", base64=base64.b64encode(raw).decode("ascii"))
+        return jsonify(ok=True, session=session, url=page.url, mime="image/jpeg", base64=base64.b64encode(raw).decode("ascii"))
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 400
 
